@@ -14,11 +14,29 @@ function failed(error: string): OnboardingActionResult<never> {
   return { ok: false, error };
 }
 
-function databaseFailure(error: { code?: string } | null, fallback: string) {
+function redactDatabaseDiagnostic(value: string | null | undefined) {
+  if (!value) return null;
+  return value
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, "[redacted id]")
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[redacted token]");
+}
+
+function databaseFailure(
+  error: { code?: string; message?: string; details?: string | null; hint?: string | null } | null,
+  fallback: string,
+  operation: string
+) {
   if (error?.code === "23505") {
     return "An active character or Arc already exists. Refresh onboarding to continue.";
   }
   if (error?.code === "42501") {
+    console.error("[onboarding] Supabase permission error", {
+      operation,
+      code: error.code,
+      message: redactDatabaseDiagnostic(error.message),
+      details: redactDatabaseDiagnostic(error.details),
+      hint: redactDatabaseDiagnostic(error.hint),
+    });
     return "Your session could not save this information. Please refresh and try again.";
   }
   return fallback;
@@ -57,7 +75,7 @@ export async function selectCharacter(
       .maybeSingle();
 
     if (existingError) {
-      return failed(databaseFailure(existingError, "We could not load your active character. Please try again."));
+      return failed(databaseFailure(existingError, "We could not load your active character. Please try again.", "read active character"));
     }
 
     if (existing) {
@@ -74,7 +92,7 @@ export async function selectCharacter(
       .single();
 
     if (error || !character) {
-      return failed(databaseFailure(error, "We could not save your character. Please try again."));
+      return failed(databaseFailure(error, "We could not save your character. Please try again.", "insert character"));
     }
 
     revalidatePath("/onboarding");
@@ -129,7 +147,7 @@ export async function createArcWithCommitments(input: {
       .maybeSingle();
 
     if (characterError) {
-      return failed(databaseFailure(characterError, "We could not load your active character. Please try again."));
+      return failed(databaseFailure(characterError, "We could not load your active character. Please try again.", "read active character before Arc creation"));
     }
     if (!activeCharacter) {
       return failed("Select an active character before creating your Arc.");
@@ -143,7 +161,7 @@ export async function createArcWithCommitments(input: {
       .maybeSingle();
 
     if (arcLookupError) {
-      return failed(databaseFailure(arcLookupError, "We could not check your active Arc. Please try again."));
+      return failed(databaseFailure(arcLookupError, "We could not check your active Arc. Please try again.", "read active Arc"));
     }
     if (existingArc) {
       return { ok: true, data: { arcId: existingArc.id } };
@@ -156,7 +174,7 @@ export async function createArcWithCommitments(input: {
       .single();
 
     if (profileError) {
-      return failed(databaseFailure(profileError, "We could not load your profile. Please try again."));
+      return failed(databaseFailure(profileError, "We could not load your profile. Please try again.", "read profile timezone"));
     }
 
     const timeZone = profile?.timezone || "UTC";
@@ -197,7 +215,7 @@ export async function createArcWithCommitments(input: {
       .single();
 
     if (createArcError || !arc) {
-      return failed(databaseFailure(createArcError, "We could not create your Arc. Please try again."));
+      return failed(databaseFailure(createArcError, "We could not create your Arc. Please try again.", "insert Arc"));
     }
     arcId = arc.id;
 
@@ -221,7 +239,7 @@ export async function createArcWithCommitments(input: {
       }
 
       arcId = null;
-      return failed(databaseFailure(commitmentError, "We could not save your Commitments. No Arc was started; please try again."));
+      return failed(databaseFailure(commitmentError, "We could not save your Commitments. No Arc was started; please try again.", "insert Commitments"));
     }
 
     revalidatePath("/onboarding");
