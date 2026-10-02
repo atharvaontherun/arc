@@ -1,5 +1,6 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/src/lib/supabase/server";
 import { ensureProfile, getAuthenticatedUserId } from "@/src/lib/supabase/onboarding";
@@ -200,30 +201,67 @@ export async function createArcWithCommitments(input: {
     endDate.setUTCDate(endDate.getUTCDate() + input.durationDays - 1);
     const endsOn = endDate.toISOString().slice(0, 10);
 
-    const { data: arc, error: createArcError } = await supabase
-      .from("arcs")
-      .insert({
-        user_id: auth.userId,
-        character_id: activeCharacter.id,
-        title: `${input.durationDays}-Day Arc`,
-        duration_days: input.durationDays,
-        status: "active",
-        starts_on: startsOn,
-        ends_on: endsOn,
-      })
-      .select("id")
-      .single();
+    const newArcId = randomUUID();
+    arcId = newArcId;
+    const arcInsertPayload = {
+      id: newArcId,
+      user_id: auth.userId,
+      character_id: activeCharacter.id,
+      title: `${input.durationDays}-Day Arc`,
+      duration_days: input.durationDays,
+      status: "active",
+      starts_on: startsOn,
+      ends_on: endsOn,
+    };
 
-    if (createArcError || !arc) {
+    const arcIdentityLog = {
+      authenticatedUserId: auth.userId,
+      arcUserId: arcInsertPayload.user_id,
+      userIdsMatch: arcInsertPayload.user_id === auth.userId,
+      arcId: newArcId,
+    };
+
+    const { error: createArcError } = await supabase
+      .from("arcs")
+      .insert(arcInsertPayload);
+
+    if (createArcError) {
+      console.error("[onboarding] insert_arc failed", {
+        ...arcIdentityLog,
+        code: createArcError.code,
+        message: createArcError.message,
+        details: createArcError.details,
+        hint: createArcError.hint,
+      });
       return failed(databaseFailure(createArcError, "We could not create your Arc. Please try again.", "insert Arc"));
     }
-    arcId = arc.id;
+
+    console.info("[onboarding] insert_arc succeeded", arcIdentityLog);
+
+    const { error: selectArcError } = await supabase
+      .from("arcs")
+      .select("id")
+      .eq("id", newArcId)
+      .single();
+
+    if (selectArcError) {
+      console.error("[onboarding] select_inserted_arc failed", {
+        ...arcIdentityLog,
+        code: selectArcError.code,
+        message: selectArcError.message,
+        details: selectArcError.details,
+        hint: selectArcError.hint,
+      });
+      return failed(databaseFailure(selectArcError, "We could not verify your Arc. Please try again.", "select inserted Arc"));
+    }
+
+    console.info("[onboarding] select_inserted_arc succeeded", arcIdentityLog);
 
     const { error: commitmentError } = await supabase.from("commitments").insert(
       commitments.map((commitment) => ({
         ...commitment,
         user_id: auth.userId,
-        arc_id: arc.id,
+        arc_id: newArcId,
       }))
     );
 
@@ -231,7 +269,7 @@ export async function createArcWithCommitments(input: {
       const { error: rollbackError } = await supabase
         .from("arcs")
         .delete()
-        .eq("id", arc.id)
+        .eq("id", newArcId)
         .eq("user_id", auth.userId);
 
       if (rollbackError) {
@@ -244,7 +282,7 @@ export async function createArcWithCommitments(input: {
 
     revalidatePath("/onboarding");
     revalidatePath("/dashboard");
-    return { ok: true, data: { arcId: arc.id } };
+    return { ok: true, data: { arcId: newArcId } };
   } catch {
     if (arcId) {
       const { error: rollbackError } = await supabase
