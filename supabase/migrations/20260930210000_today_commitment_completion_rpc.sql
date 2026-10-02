@@ -1,0 +1,80 @@
+CREATE OR REPLACE FUNCTION public.set_today_commitment_completion(
+  p_commitment_id uuid,
+  p_completed boolean
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $function$
+DECLARE
+  v_user_id uuid := auth.uid();
+  v_arc_id uuid;
+  v_starts_on date;
+  v_ends_on date;
+  v_timezone text;
+  v_today date;
+  v_progress_id uuid;
+BEGIN
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Authentication required' USING ERRCODE = '28000';
+  END IF;
+
+  IF p_commitment_id IS NULL OR p_completed IS NULL THEN
+    RAISE EXCEPTION 'A commitment and completion state are required' USING ERRCODE = '22023';
+  END IF;
+
+  SELECT a.id, a.starts_on, a.ends_on, COALESCE(NULLIF(p.timezone, ''), 'UTC')
+    INTO v_arc_id, v_starts_on, v_ends_on, v_timezone
+  FROM public.arcs AS a
+  JOIN public.characters AS c
+    ON c.id = a.character_id
+   AND c.user_id = v_user_id
+   AND c.status = 'active'
+  LEFT JOIN public.profiles AS p
+    ON p.id = v_user_id
+  WHERE a.user_id = v_user_id
+    AND a.status = 'active'
+  LIMIT 1;
+
+  IF v_arc_id IS NULL THEN
+    RAISE EXCEPTION 'No active Arc and character found' USING ERRCODE = '42501';
+  END IF;
+
+  v_today := pg_catalog.timezone(v_timezone, pg_catalog.now())::date;
+
+  IF v_today < v_starts_on OR v_today > v_ends_on THEN
+    RAISE EXCEPTION 'Today is outside the active Arc dates' USING ERRCODE = '22023';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.commitments AS cm
+    WHERE cm.id = p_commitment_id
+      AND cm.arc_id = v_arc_id
+      AND cm.user_id = v_user_id
+  ) THEN
+    RAISE EXCEPTION 'Commitment does not belong to the active Arc' USING ERRCODE = '42501';
+  END IF;
+
+  -- Omit all game-state columns; their existing defaults/nullability apply.
+  INSERT INTO public.daily_progress (arc_id, progress_date)
+  VALUES (v_arc_id, v_today)
+  ON CONFLICT (arc_id, progress_date) DO NOTHING;
+
+  SELECT dp.id
+    INTO v_progress_id
+  FROM public.daily_progress AS dp
+  WHERE dp.arc_id = v_arc_id
+    AND dp.progress_date = v_today;
+
+  INSERT INTO public.daily_results (arc_id, progress_id, commitment_id, completed)
+  VALUES (v_arc_id, v_progress_id, p_commitment_id, p_completed)
+  ON CONFLICT (progress_id, commitment_id)
+  DO UPDATE SET completed = EXCLUDED.completed;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.set_today_commitment_completion(uuid, boolean) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.set_today_commitment_completion(uuid, boolean) FROM anon;
+GRANT EXECUTE ON FUNCTION public.set_today_commitment_completion(uuid, boolean) TO authenticated;
